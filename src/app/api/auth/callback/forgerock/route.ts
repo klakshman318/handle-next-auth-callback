@@ -7,15 +7,27 @@ import { randomBytes } from "crypto";
 const SSO_COOKIE_NAME = process.env.FORGEROCK_REQUIRED_COOKIE || "iPlanetDirectoryPro";
 const rand = () => randomBytes(16).toString("hex");
 
+// Extract "name=value" pairs from a Set-Cookie header string
+function pickCookiePairs(setCookieHeader: string | null): string[] {
+    if (!setCookieHeader) return [];
+    // Some platforms combine multiple Set-Cookie values into a single comma-separated header.
+    // We split on comma, then take only the "name=value" before the first ';'.
+    return setCookieHeader
+        .split(/,(?=[^ ;]+=)/) // split only where a new cookie likely starts
+        .map(v => v.trim().split(";", 1)[0])
+        .filter(Boolean);
+}
+
 export async function GET(req: NextRequest) {
     const url = new URL(req.url);
     const origin = url.origin;
     const code = url.searchParams.get("code") ?? "";
     if (!code) return NextResponse.json({ error: "Missing code" }, { status: 400 });
 
-    const cookieHeader = req.headers.get("cookie") ?? "";
+    const incomingCookieHeader = req.headers.get("cookie") ?? "";
+
     const fromCookie =
-        cookieHeader
+        incomingCookieHeader
             .split(";")
             .map(s => s.trim())
             .find(s => s.startsWith(`${SSO_COOKIE_NAME}=`))
@@ -24,21 +36,31 @@ export async function GET(req: NextRequest) {
     const iPlanet = fromCookie || rand();
     const isFallback = !fromCookie;
 
-    // 1) CSRF
+    // 1) Get CSRF and CAPTURE the Set-Cookie from the response
     const csrfRes = await fetch(`${origin}/api/auth/csrf`, {
-        headers: { cookie: cookieHeader, accept: "application/json" },
+        headers: { cookie: incomingCookieHeader, accept: "application/json" },
         cache: "no-store",
         redirect: "manual"
     });
+
     if (!csrfRes.ok) {
-        return NextResponse.redirect(new URL("/login?error=csrf_http_${csrfRes.status}", origin));
+        return NextResponse.redirect(new URL(`/login?error=csrf_http_${csrfRes.status}`, origin));
     }
+
     const { csrfToken } = await csrfRes.json();
     if (!csrfToken) {
         return NextResponse.redirect(new URL("/login?error=csrf_missing", origin));
     }
 
-    // 2) Post credentials to NextAuth and land on postLogin
+    // Merge original cookies + CSRF cookie(s)
+    const csrfSetCookie = csrfRes.headers.get("set-cookie");
+    const csrfPairs = pickCookiePairs(csrfSetCookie);              // e.g. ["next-auth.csrf-token=..."]
+    const mergedCookieHeader = [
+        incomingCookieHeader,
+        csrfPairs.join("; ")
+    ].filter(Boolean).join("; ");
+
+    // 2) POST to credentials callback WITH the merged Cookie header
     const callbackUrl = `${origin}/api/postLogin`;
     const body = new URLSearchParams({
         csrfToken,
@@ -48,13 +70,13 @@ export async function GET(req: NextRequest) {
     });
 
     const postRes = await fetch(
-        `${url.origin}/api/auth/callback/credentials?` + new URLSearchParams({ callbackUrl }),
+        `${origin}/api/auth/callback/credentials?` + new URLSearchParams({ callbackUrl }),
         {
             method: "POST",
             headers: {
                 "content-type": "application/x-www-form-urlencoded",
                 accept: "application/json",
-                ...(cookieHeader ? { cookie: cookieHeader } : {})
+                ...(mergedCookieHeader ? { cookie: mergedCookieHeader } : {})
             },
             body,
             redirect: "manual"
@@ -67,6 +89,5 @@ export async function GET(req: NextRequest) {
     const setCookie = postRes.headers.get("set-cookie");
     if (setCookie) out.headers.append("set-cookie", setCookie);
 
-    console.log("Forgerock callback redirecting to:", location);
     return out;
 }
