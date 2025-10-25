@@ -9,6 +9,7 @@ import { runDecisionChain } from "@/lib/decision";
 export async function GET(req: NextRequest) {
     const origin = new URL(req.url).origin;
     const session = await getServerSession(authOptions);
+    console.log("Session:", session);
     if (!session?.user?.id) {
         return NextResponse.redirect(new URL("/login?error=session", origin));
     }

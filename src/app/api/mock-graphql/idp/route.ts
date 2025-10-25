@@ -31,7 +31,8 @@ export async function POST(req: NextRequest) {
                     id: `user-${short}`,
                     name: `Lakshman ${short}`,
                     email: `user${short}@example.com`,
-                    roles: short.endsWith("1") ? ["user", "viewer"] : ["user"]
+                    roles: short.endsWith("1") ? ["user", "viewer"] : ["user"],
+                    parentaccId: "123"
                 }
             }
         }, {
